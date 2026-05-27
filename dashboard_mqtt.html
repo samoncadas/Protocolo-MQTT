@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard MQTT — ESP8266 + DHT11</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f0; color: #1a1a1a; min-height: 100vh; }
+  header { background: #fff; border-bottom: 1px solid #e0e0d8; padding: 1rem 2rem; display: flex; align-items: center; justify-content: space-between; }
+  header h1 { font-size: 18px; font-weight: 500; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #666; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #ccc; transition: background 0.4s; }
+  .dot.connected { background: #639922; }
+  .dot.error { background: #E24B4A; }
+  .dot.connecting { background: #BA7517; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+  main { max-width: 1000px; margin: 2rem auto; padding: 0 1.5rem; }
+  .flow { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 2rem; flex-wrap: wrap; }
+  .flow-node { background: #fff; border: 1px solid #e0e0d8; border-radius: 8px; padding: 10px 16px; font-size: 12px; color: #555; text-align: center; line-height: 1.5; }
+  .flow-node.active { border-color: #639922; color: #3B6D11; }
+  .flow-arrow { color: #aaa; font-size: 20px; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 2rem; }
+  .metric { background: #fff; border: 1px solid #e0e0d8; border-radius: 12px; padding: 1.25rem; }
+  .metric-label { font-size: 12px; color: #888; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .metric-value { font-size: 36px; font-weight: 500; color: #1a1a1a; line-height: 1; }
+  .metric-unit { font-size: 18px; font-weight: 400; color: #888; }
+  .metric-sub { font-size: 11px; color: #aaa; margin-top: 6px; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 2rem; }
+  .chart-card { background: #fff; border: 1px solid #e0e0d8; border-radius: 12px; padding: 1.25rem; }
+  .chart-title { font-size: 13px; color: #888; margin-bottom: 12px; }
+  .log { background: #fff; border: 1px solid #e0e0d8; border-radius: 12px; padding: 1.25rem; margin-bottom: 2rem; }
+  .log-title { font-size: 13px; color: #888; margin-bottom: 10px; }
+  .log-entries { font-family: 'Courier New', monospace; font-size: 12px; max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+  .log-entry { display: flex; gap: 12px; padding: 3px 0; border-bottom: 1px solid #f0f0e8; }
+  .log-time { color: #aaa; min-width: 70px; }
+  .log-topic { color: #185FA5; min-width: 180px; }
+  .log-value { color: #1a1a1a; font-weight: 500; }
+  .config { background: #fff; border: 1px solid #e0e0d8; border-radius: 12px; padding: 1.25rem; margin-bottom: 2rem; }
+  .config-title { font-size: 13px; color: #888; margin-bottom: 12px; }
+  .config-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .config-row label { font-size: 13px; color: #555; min-width: 60px; }
+  .config-row input { border: 1px solid #e0e0d8; border-radius: 6px; padding: 6px 10px; font-size: 13px; width: 180px; }
+  .config-row button { background: #1a1a1a; color: #fff; border: none; border-radius: 6px; padding: 7px 16px; font-size: 13px; cursor: pointer; }
+  .config-row button:hover { background: #333; }
+  @media (max-width: 600px) { .charts { grid-template-columns: 1fr; } header { flex-direction: column; gap: 8px; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Dashboard MQTT — ESP8266 + DHT11</h1>
+  <div class="status">
+    <div class="dot connecting" id="dot"></div>
+    <span id="statusText">Conectando al broker...</span>
+  </div>
+</header>
+
+<main>
+
+  <div class="config">
+    <div class="config-title">Configuración del broker</div>
+    <div class="config-row">
+      <label>IP broker</label>
+      <input type="text" id="brokerIp" value="172.20.10.3" />
+      <label>Puerto WS</label>
+      <input type="text" id="brokerPort" value="9001" style="width:80px;" />
+      <button onclick="reconnect()">Conectar</button>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="flow-node active">ESP8266<br>+ DHT11</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active">Publica MQTT<br><small>exposicion/#</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active" id="brokerNode">Broker Mosquitto<br><small id="brokerAddr">172.20.10.3:1883</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-node active">Dashboard<br><small>WebSocket :9001</small></div>
+  </div>
+
+  <div class="metrics">
+    <div class="metric">
+      <div class="metric-label">🌡️ Temperatura</div>
+      <div class="metric-value" id="tempVal">—<span class="metric-unit"> °C</span></div>
+      <div class="metric-sub" id="tempSub">Sin datos aún</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">💧 Humedad</div>
+      <div class="metric-value" id="humVal">—<span class="metric-unit"> %</span></div>
+      <div class="metric-sub" id="humSub">Sin datos aún</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">📨 Mensajes</div>
+      <div class="metric-value" id="msgCount">0</div>
+      <div class="metric-sub">Total recibidos</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">🕐 Última lectura</div>
+      <div class="metric-value" id="lastTime" style="font-size:20px;">—</div>
+      <div class="metric-sub">Hora del último dato</div>
+    </div>
+  </div>
+
+  <div class="charts">
+    <div class="chart-card">
+      <div class="chart-title">Temperatura en tiempo real (°C)</div>
+      <div style="position:relative; height:200px;">
+        <canvas id="tempChart" role="img" aria-label="Gráfica de temperatura en tiempo real">Temperatura del sensor DHT11.</canvas>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Humedad en tiempo real (%)</div>
+      <div style="position:relative; height:200px;">
+        <canvas id="humChart" role="img" aria-label="Gráfica de humedad en tiempo real">Humedad del sensor DHT11.</canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="log">
+    <div class="log-title">Log de mensajes MQTT</div>
+    <div class="log-entries" id="logEntries">
+      <div class="log-entry">
+        <span class="log-time">—</span>
+        <span class="log-topic">Esperando mensajes en exposicion/#...</span>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+const MAX_POINTS = 20;
+const chartLabels = [];
+const tempData = [];
+const humData = [];
+let msgCount = 0;
+let client = null;
+
+const tempChart = new Chart(document.getElementById('tempChart'), {
+  type: 'line',
+  data: { labels: chartLabels, datasets: [{ label: '°C', data: tempData, borderColor: '#D85A30', backgroundColor: 'rgba(216,90,48,0.08)', borderWidth: 2, pointRadius: 3, tension: 0.3, fill: true }] },
+  options: { responsive: true, maintainAspectRatio: false, animation: { duration: 300 }, plugins: { legend: { display: false } }, scales: { x: { ticks: { maxTicksLimit: 6, font: { size: 10 } } }, y: { ticks: { font: { size: 10 } } } } }
+});
+
+const humChart = new Chart(document.getElementById('humChart'), {
+  type: 'line',
+  data: { labels: chartLabels, datasets: [{ label: '%', data: humData, borderColor: '#185FA5', backgroundColor: 'rgba(24,95,165,0.08)', borderWidth: 2, pointRadius: 3, tension: 0.3, fill: true }] },
+  options: { responsive: true, maintainAspectRatio: false, animation: { duration: 300 }, plugins: { legend: { display: false } }, scales: { x: { ticks: { maxTicksLimit: 6, font: { size: 10 } } }, y: { ticks: { font: { size: 10 } } } } }
+});
+
+function setStatus(state, text) {
+  const dot = document.getElementById('dot');
+  dot.className = 'dot ' + state;
+  document.getElementById('statusText').textContent = text;
+}
+
+function addLog(time, topic, value) {
+  const log = document.getElementById('logEntries');
+  if (log.children.length === 1 && log.children[0].querySelector('.log-topic') && log.children[0].querySelector('.log-topic').textContent.includes('Esperando')) {
+    log.innerHTML = '';
+  }
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML = '<span class="log-time">' + time + '</span><span class="log-topic">' + topic + '</span><span class="log-value">' + value + '</span>';
+  log.appendChild(entry);
+  if (log.children.length > 50) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+}
+
+function onMessage(topic, value) {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const val = parseFloat(value);
+
+  msgCount++;
+  document.getElementById('msgCount').textContent = msgCount;
+  document.getElementById('lastTime').textContent = timeStr;
+  addLog(timeStr, topic, value);
+
+  if (topic.includes('temperatura')) {
+    chartLabels.push(timeStr);
+    tempData.push(parseFloat(val.toFixed(1)));
+    if (chartLabels.length > MAX_POINTS) { chartLabels.shift(); tempData.shift(); humData.shift(); }
+    tempChart.update();
+    document.getElementById('tempVal').innerHTML = val.toFixed(1) + '<span class="metric-unit"> °C</span>';
+    const mn = Math.min(...tempData).toFixed(1), mx = Math.max(...tempData).toFixed(1);
+    document.getElementById('tempSub').textContent = 'Mín: ' + mn + '°C — Máx: ' + mx + '°C';
+  }
+
+  if (topic.includes('humedad')) {
+    humData.push(parseFloat(val.toFixed(1)));
+    humChart.update();
+    document.getElementById('humVal').innerHTML = val.toFixed(1) + '<span class="metric-unit"> %</span>';
+    const mn = Math.min(...humData).toFixed(0), mx = Math.max(...humData).toFixed(0);
+    document.getElementById('humSub').textContent = 'Mín: ' + mn + '% — Máx: ' + mx + '%';
+  }
+}
+
+function connect(ip, port) {
+  if (client) { try { client.disconnect(); } catch(e) {} }
+  setStatus('connecting', 'Conectando a ' + ip + ':' + port + '...');
+  document.getElementById('brokerAddr').textContent = ip + ':1883';
+
+  client = new Paho.MQTT.Client(ip, parseInt(port), 'dashboard_' + Math.random().toString(16).slice(2));
+
+  client.onConnectionLost = function(r) {
+    setStatus('error', 'Conexión perdida — ' + r.errorMessage);
+    setTimeout(() => connect(ip, port), 5000);
+  };
+
+  client.onMessageArrived = function(msg) {
+    onMessage(msg.destinationName, msg.payloadString);
+  };
+
+  client.connect({
+    onSuccess: function() {
+      setStatus('connected', 'Conectado a ' + ip + ' — recibiendo datos');
+      client.subscribe('exposicion/#');
+    },
+    onFailure: function(e) {
+      setStatus('error', 'Error de conexión: ' + e.errorMessage);
+      setTimeout(() => connect(ip, port), 5000);
+    },
+    timeout: 10
+  });
+}
+
+function reconnect() {
+  const ip = document.getElementById('brokerIp').value.trim();
+  const port = document.getElementById('brokerPort').value.trim();
+  connect(ip, port);
+}
+
+connect('172.20.10.3', '9001');
+</script>
+</body>
+</html>
